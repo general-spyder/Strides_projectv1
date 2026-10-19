@@ -8,8 +8,6 @@ on:
 jobs:
   build-windows:
     runs-on: windows-2022
-    permissions:
-      contents: read
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -26,21 +24,37 @@ jobs:
       - name: Collect EXE and VST3 artifacts
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          $files = Get-ChildItem -Path build -Recurse -File | Where-Object {
-            ($_.Extension -eq '.exe' -and $_.FullName -match 'Release|Standalone') -or $_.Extension -eq '.vst3'
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:GITHUB_WORKSPACE 'artifacts'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE 'build'
+
+          $exes = @(Get-ChildItem -LiteralPath $buildRoot -Recurse -File -Filter '*.exe' |
+            Where-Object { $_.FullName -match 'Release|Standalone' -and $_.FullName -notmatch 'CMakeFiles|CompilerId' })
+          foreach ($exe in $exes) {
+            $dest = Join-Path $out 'Standalone'
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $dest $exe.Name) -Force
+            Write-Host "Collected EXE: $($exe.FullName)"
           }
-          $bundles = Get-ChildItem -Path build -Recurse -Directory -Filter '*.vst3'
-          foreach ($file in $files) {
-            $destination = Join-Path artifacts $file.Name
-            Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
-          }
+
+          $bundles = @(Get-ChildItem -LiteralPath $buildRoot -Recurse -Directory -Filter '*.vst3' |
+            Where-Object { $_.FullName -match 'Release|VST3' })
           foreach ($bundle in $bundles) {
-            Copy-Item -LiteralPath $bundle.FullName -Destination (Join-Path artifacts $bundle.Name) -Recurse -Force
+            $dest = Join-Path $out 'VST3'
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            $target = Join-Path $dest $bundle.Name
+            if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+            Copy-Item -LiteralPath $bundle.FullName -Destination $target -Recurse -Force
+            Write-Host "Collected VST3 bundle: $($bundle.FullName)"
           }
-          Get-ChildItem artifacts -Recurse | Select-Object FullName
-          if (-not (Get-ChildItem artifacts -Recurse -File | Where-Object { $_.Extension -in '.exe', '.vst3' })) {
-            throw 'No EXE or VST3 output found. Check JUCE targets and CMake build logs.'
+
+          $standalone = @(Get-ChildItem -LiteralPath (Join-Path $out 'Standalone') -File -ErrorAction SilentlyContinue)
+          $plugins = @(Get-ChildItem -LiteralPath (Join-Path $out 'VST3') -Directory -Filter '*.vst3' -ErrorAction SilentlyContinue)
+          if ($standalone.Count -eq 0 -or $plugins.Count -eq 0) {
+            Write-Host 'Build files found:'
+            Get-ChildItem -LiteralPath $buildRoot -Recurse | Where-Object { $_.Name -match '\.exe$|\.vst3$' } | Select-Object -ExpandProperty FullName
+            throw "Expected standalone EXE and VST3 bundle; found $($standalone.Count) EXE(s), $($plugins.Count) VST3 bundle(s)."
           }
 
       - name: Upload Windows builds
